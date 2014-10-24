@@ -10,19 +10,21 @@ import (
 
 func main() {
 	var (
-		host           string
-		community      string
-		timeout        int64
-		management_cpu bool
-		data_cpu       bool
+		host      string
+		community string
+		timeout   int64
+		mode      string
+		critical  int64
+		warning   int64
 	)
 
 	flag.StringVar(&host, "H", "127.0.0.1", "Target host")
 	flag.StringVar(&community, "community", "public", "SNMP community string")
 	flag.Int64Var(&timeout, "timeout", 10, "SNMP connection timeout")
 
-	flag.BoolVar(&management_cpu, "mode-management-cpu", false, "Check the management plane CPU utilization")
-	flag.BoolVar(&data_cpu, "mode-data-cpu", false, "Check the data plane CPU utilization")
+	flag.StringVar(&mode, "mode", "", "Specify which cpu mode to check. management-cpu or data-cpu")
+	flag.Int64Var(&warning, "warning", 80, "Warning threshold")
+	flag.Int64Var(&critical, "critical", 90, "Critical threshold")
 
 	flag.Parse()
 
@@ -39,51 +41,62 @@ func main() {
 		return
 	}
 
-	if management_cpu {
-		pkt, err := c.Get(oids["management-plane-cpu"])
-		if err != nil {
-			check.AddResult(nagiosplugin.UNKNOWN, fmt.Sprintf("error: %v", err))
-			return
-		}
+	utilization, err := getData(c, mode)
+	if err != nil {
+		check.AddResult(nagiosplugin.UNKNOWN, fmt.Sprintf("error: %v", err))
+		return
+	}
 
-		for _, v := range pkt.Variables {
-			switch v.Type {
-			case gosnmp.Integer:
-				val := v.Value.(int)
-				if val >= 80 && val < 90 {
-					check.AddResult(nagiosplugin.WARNING, fmt.Sprintf("Management plane cpu utilization - %d%%", val))
-				} else if val >= 90 {
-					check.AddResult(nagiosplugin.CRITICAL, fmt.Sprintf("Management plane cpu utilization - %d%%", val))
-				} else {
-					check.AddResult(nagiosplugin.OK, fmt.Sprintf("Management plane cpu utilization - %d%%", val))
-				}
+	check.AddPerfDatum("utilization", "%", float64(utilization), float64(warning), float64(critical))
 
-				check.AddPerfDatum("cpu", "%", float64(val), 80.0, 90.0)
-			}
+	crit, _, _, err := parseRange(critical, utilization)
+	if err != nil {
+		check.AddResult(nagiosplugin.UNKNOWN, fmt.Sprintf("error: %v", err))
+		return
+	}
+
+	if crit {
+		check.AddResult(nagiosplugin.CRITICAL, fmt.Sprintf("%s utilization - %d%%", mode, utilization))
+		return
+	}
+
+	warn, _, _, err := parseRange(warning, utilization)
+	if err != nil {
+		check.AddResult(nagiosplugin.UNKNOWN, fmt.Sprintf("error: %v", err))
+		return
+	}
+
+	if warn {
+		check.AddResult(nagiosplugin.WARNING, fmt.Sprintf("%s utilization - %d%%", mode, utilization))
+		return
+	}
+
+	check.AddResult(nagiosplugin.OK, fmt.Sprintf("%s utilization - %d%%", mode, utilization))
+}
+
+func getData(s *gosnmp.GoSNMP, oidType string) (int, error) {
+	val := -1
+
+	pkt, err := s.Get(oids[oidType])
+	if err != nil {
+		return val, err
+	}
+
+	for _, v := range pkt.Variables {
+		switch v.Type {
+		case gosnmp.Integer:
+			val = v.Value.(int)
 		}
 	}
 
-	if data_cpu {
-		pkt, err := c.Get(oids["data-plane-cpu"])
-		if err != nil {
-			check.AddResult(nagiosplugin.UNKNOWN, fmt.Sprintf("error: %v", err))
-			return
-		}
+	return val, nil
+}
 
-		for _, v := range pkt.Variables {
-			switch v.Type {
-			case gosnmp.Integer:
-				val := v.Value.(int)
-				if val >= 80 && val < 90 {
-					check.AddResult(nagiosplugin.WARNING, fmt.Sprintf("Data plane cpu utilization - %d%%", val))
-				} else if val >= 90 {
-					check.AddResult(nagiosplugin.CRITICAL, fmt.Sprintf("Data plane cpu utilization - %d%%", val))
-				} else {
-					check.AddResult(nagiosplugin.OK, fmt.Sprintf("Data plane cpu utilization - %d%%", val))
-				}
-
-				check.AddPerfDatum("cpu", "%", float64(val), 80.0, 90.0)
-			}
-		}
+func parseRange(r int64, val int) (bool, float64, float64, error) {
+	nr, err := nagiosplugin.ParseRange(fmt.Sprintf("%d", r))
+	if err != nil {
+		return false, 0, 0, err
 	}
+
+	return nr.CheckInt(val), nr.Start, nr.End, nil
 }
